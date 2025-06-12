@@ -1,0 +1,31 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_excel("/Sample_test.xlsx")
+
+df['XY'] = df['X']*df['y']
+df['X2'] = df['X']*df['X']
+
+n = len(df['X'])
+
+sum_xy = df['XY'].sum()
+sum_x = df['X'].sum()
+sum_y = df['y'].sum()
+sum_x2 = df['X2'].sum()
+
+m = (n*sum_xy - sum_x*sum_y)/(n*sum_x2 - sum_x**2)
+
+b = (sum_y - m*sum_x)/n
+if b==0:
+  raise("Value Error, Denominator cannot be zero")
+
+df['y_pred'] = m*df['X'] + b
+
+print(df)
+plt.scatter(df['X'], df['y'], label="Actual Data", color='blue')
+plt.plot(df['X'], df['y_pred'], label="Regression Line", color='red')
+plt.xlabel("X")
+plt.ylabel("y")
+plt.legend()
+plt.title("Linear Regression Without Library")
+plt.show()
