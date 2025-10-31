@@ -1,0 +1,243 @@
+import os
+import pandas as pd
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
+
+try:
+    api_key = os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        api_key = ""
+
+    genai.configure(api_key=api_key)
+    print("✅ Gemini API configured successfully!")
+
+except Exception as e:
+    print(f"ERROR: Failed to configure Gemini API: {e}")
+    print("\nTo fix this:")
+    print("1. Get your API key from: https://makersuite.google.com/app/apikey")
+    print("2. Either:")
+    print("   a. Set environment variable: os.environ['GEMINI_API_KEY'] = 'your-key'")
+    print("   b. Replace the api_key variable directly in the code")
+    exit()
+
+try:
+    csv_file_path = "/content/ayurvedic_home_remedies_master.csv"
+
+    if not os.path.exists(csv_file_path):
+        print(f"⚠️ File not found at {csv_file_path}")
+        print("Creating a sample dataset for demonstration...")
+
+        sample_data = {
+            'age_category': ['infant', 'child', 'adult', 'elderly', 'infant', 'adult'],
+            'problem': ['digestive', 'cold', 'headache', 'joint pain', 'colic', 'stress'],
+            'symptom': ['bloating', 'cough', 'migraine', 'stiffness', 'crying', 'anxiety'],
+            'prakruti': ['vata', 'kapha', 'pitta', 'vata', 'vata', 'pitta'],
+            'solution': [
+                'Gentle tummy massage with warm mustard oil. Give small amounts of warm water with ajwain.',
+                'Honey with ginger juice twice daily. Steam inhalation with eucalyptus oil.',
+                'Apply sandalwood paste on forehead. Practice pranayama breathing exercises.',
+                'Massage with sesame oil. Take turmeric milk before bed.',
+                'Warm compress on tummy. Gripe water with fennel seeds.',
+                'Ashwagandha powder with warm milk. Practice meditation daily.'
+            ]
+        }
+        remedy_df = pd.DataFrame(sample_data)
+        print("✅ Sample dataset created for testing!")
+    else:
+        remedy_df = pd.read_csv(csv_file_path)
+        print(f"✅ Dataset loaded successfully! ({len(remedy_df)} remedies found)")
+
+    remedy_df.columns = remedy_df.columns.str.strip()
+
+    # Display dataset info
+    print(f"\nDataset columns: {list(remedy_df.columns)}")
+    print(f"Dataset shape: {remedy_df.shape}")
+
+except Exception as e:
+    print(f"❌ ERROR loading dataset: {e}")
+    print("\nPlease ensure:")
+    print("1. The CSV file 'ayurvedic_home_remedies_master1.csv' is uploaded to Colab")
+    print("2. The file path is correct")
+    print("3. The file has the required columns: age_category, problem, symptom, prakruti, solution")
+    exit()
+
+# --- 2. PARAMETER EXTRACTION ---
+def extract_parameters(query, df):
+    """
+    Extracts known parameters (symptoms, problems, etc.) from the user query
+    by matching against unique values in the dataframe.
+    """
+    extracted = {
+        'age_category': None,
+        'problem': None,
+        'symptom': None,
+        'prakruti': None
+    }
+
+    query_lower = query.lower()
+
+    # Define age-related keywords
+    age_keywords = {
+        'infant': ['baby', 'infant', 'newborn', 'toddler'],
+        'child': ['child', 'kid', 'children'],
+        'adult': ['adult', 'grown-up'],
+        'elderly': ['elderly', 'senior', 'old', 'aged']
+    }
+
+    # Check for age categories using keywords
+    for age_cat, keywords in age_keywords.items():
+        for keyword in keywords:
+            if keyword in query_lower:
+                extracted['age_category'] = age_cat
+                break
+
+    # Iterate through each parameter type and check for matches
+    for param_type in ['problem', 'symptom', 'prakruti']:
+        if param_type in df.columns:
+            unique_values = df[param_type].dropna().unique()
+            for value in unique_values:
+                # Check if a value from our dataset is in the query
+                if str(value).lower() in query_lower:
+                    extracted[param_type] = value
+                    break
+
+    return extracted
+
+# --- 3. RETRIEVER: The "Smart Search" Function ---
+def find_best_remedy_in_dataset(params, df):
+    """
+    Finds the most relevant row in the dataset based on the extracted parameters.
+    This acts as our more precise "retriever".
+    """
+    best_score = 0
+    best_remedy = None
+
+    for index, row in df.iterrows():
+        current_score = 0
+        # Score based on how many extracted parameters match the current row
+        for param, value in params.items():
+            if value and pd.notna(row.get(param)):
+                if str(value).lower() == str(row[param]).lower():
+                    current_score += 1
+
+        if current_score > best_score:
+            best_score = current_score
+            best_remedy = row
+
+    return best_remedy if best_score > 0 else None
+
+# --- 4. GENERATOR: The Function to Call Gemini ---
+def get_remedy_suggestion(user_query):
+    """
+    Orchestrates the RAG process: extracts params, retrieves data, and generates a response.
+    """
+    # Step 1: Extract parameters from the user query
+    print(f"\n🔬 Analyzing query: '{user_query}'...")
+    extracted_params = extract_parameters(user_query, remedy_df)
+    print(f"📊 Extracted parameters: {extracted_params}")
+
+    # Step 2: Retrieve the most relevant remedy from our dataset using the parameters
+    context_remedy = find_best_remedy_in_dataset(extracted_params, remedy_df)
+
+    # Step 3: Check if any relevant information was found
+    if context_remedy is None:
+        # Try a more general search if exact match not found
+        print("🔍 No exact match found, trying broader search...")
+        return ("I'm sorry, but I couldn't find a specific remedy in my knowledge base "
+                "matching your description. Please try being more specific about the "
+                "age group (infant/child/adult/elderly) and symptoms. "
+                "It's always best to consult with a professional for health advice.")
+
+        # Step 4: Construct a detailed prompt for the Gemini model
+    prompt = f"""
+    You are an expert Ayurvedic assistant. Your task is to provide a helpful remedy suggestion based ONLY on the information provided to you. Do not use any external knowledge.
+
+    **Context from knowledge base:**
+    - Age Category: {context_remedy.get('age_category', 'Not specified')}
+    - Problem: {context_remedy.get('problem', 'Not specified')}
+    - Symptom: {context_remedy.get('symptom', 'Not specified')}
+    - Prakruti (Constitution): {context_remedy.get('prakruti', 'Not specified')}
+    - Recommended Solution: {context_remedy.get('solution', 'Not specified')}
+
+    **User's Question:**
+    "{user_query}"
+
+    Based strictly on the context above, provide a **detailed remedy suggestion** for the user.
+    Also don't include Too many uneccessary symbols. don't make it interactive it should be more of asserative format.
+
+    Your response must include:
+    1. Why the recommended remedy may help.
+    2. Step-by-step preparation and usage instructions.
+    3. Any lifestyle or supportive advice (if possible).
+    4. A final note reminding the user to consult a healthcare professional if symptoms persist.
+
+    Format the answer in a friendly, structured, and easy-to-follow way. Use headings, bullet points, or numbers where appropriate.
+    """
+
+
+    # Step 5: Call the Gemini API to generate the response
+    try:
+        print("🧠 Generating personalized suggestion...")
+        model = genai.GenerativeModel("gemini-2.5-pro")
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        print(f"⚠️ Error calling Gemini API: {e}")
+        # Fallback to direct solution if API fails
+        return f"""Based on your query about {extracted_params}, here's what I found:
+
+**Recommended Remedy:**
+{context_remedy.get('solution', 'No specific solution found')}
+
+**Applicable for:** {context_remedy.get('age_category', 'General')} age group
+**Main concern:** {context_remedy.get('problem', 'Not specified')}
+**Key symptom:** {context_remedy.get('symptom', 'Not specified')}
+
+Please consult with an Ayurvedic practitioner or healthcare professional before trying any remedy, especially for infants and children."""
+
+# --- 5. TEST FUNCTION ---
+def test_system():
+    """Test the system with sample queries"""
+    print("\n" + "="*50)
+    print("🧪 TESTING THE SYSTEM")
+    print("="*50)
+
+    test_queries = [
+        "remedy for infant with bloating",
+        "what can help with child's cough?",
+        "I have a headache and I'm an adult",
+        "elderly person with joint pain"
+    ]
+
+    for query in test_queries:
+        print(f"\n📝 Test Query: '{query}'")
+        suggestion = get_remedy_suggestion(query)
+        print(f"💡 Response: {suggestion[:200]}..." if len(suggestion) > 200 else f"💡 Response: {suggestion}")
+        print("-"*40)
+
+# --- 6. MAIN EXECUTION ---
+if __name__ == "__main__":
+    print("\n" + "="*50)
+    print("🌿 AYURVEDIC REMEDY SUGGESTION SYSTEM 🌿")
+    print("="*50)
+    print("\nThis system uses RAG (Retrieval Augmented Generation) to provide")
+    print("Ayurvedic remedy suggestions based on your symptoms and age group.")
+    print("\nType 'test' to run test queries")
+    print("Type 'exit' to quit")
+    print("-"*50)
+
+    # Interactive loop
+    while True:
+        user_input = input("\n👤 Your query: ").strip()
+
+        if user_input.lower() == 'exit':
+            print("\n🙏 Thank you for using the Ayurvedic Remedy System. Stay healthy!")
+            break
+        elif user_input.lower() == 'test':
+            test_system()
+        elif user_input:
+            suggestion = get_remedy_suggestion(user_input)
+            print(f"\n🤖 Assistant:\n{suggestion}")
+        else:
+            print("⚠️ Please enter a valid query.")
